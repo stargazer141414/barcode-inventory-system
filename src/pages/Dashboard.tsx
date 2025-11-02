@@ -14,7 +14,9 @@ import {
   TrendingDown,
   Edit2,
   Trash2,
-  Plus
+  Plus,
+  Filter,
+  X
 } from 'lucide-react';
 
 export default function Dashboard() {
@@ -25,12 +27,24 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage] = useState(50); // Show 50 items per page
+
+  // Filter state
+  const [productFilter, setProductFilter] = useState('');
+  const [colourFilter, setColourFilter] = useState('');
+  const [sizeFilter, setSizeFilter] = useState('');
+  const [uniqueProducts, setUniqueProducts] = useState<string[]>([]);
+  const [uniqueColours, setUniqueColours] = useState<string[]>([]);
+  const [uniqueSizes, setUniqueSizes] = useState<string[]>([]);
+  const [filtersLoading, setFiltersLoading] = useState(true);
 
   useEffect(() => {
     if (!user) {
       navigate('/login');
     } else {
       loadInventory();
+      loadFilterOptions();
       
       // Subscribe to real-time changes
       const subscription = supabase
@@ -42,6 +56,7 @@ export default function Dashboard() {
           filter: `user_id=eq.${user.id}`
         }, () => {
           loadInventory();
+          loadFilterOptions();
         })
         .subscribe();
 
@@ -52,30 +67,135 @@ export default function Dashboard() {
   }, [user, navigate]);
 
   useEffect(() => {
-    const filtered = inventory.filter(item => 
-      item.barcode.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.product.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.colour?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.size?.toLowerCase().includes(searchQuery.toLowerCase())
-    );
+    let filtered = inventory.filter(item => {
+      // Search filter
+      const matchesSearch = !searchQuery || 
+        item.barcode.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.product.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.colour?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.size?.toLowerCase().includes(searchQuery.toLowerCase());
+
+      // Product filter
+      const matchesProduct = !productFilter || item.product === productFilter;
+
+      // Colour filter
+      const matchesColour = !colourFilter || 
+        (colourFilter === 'none' ? !item.colour : item.colour === colourFilter);
+
+      // Size filter
+      const matchesSize = !sizeFilter || 
+        (sizeFilter === 'none' ? !item.size : item.size === sizeFilter);
+
+      return matchesSearch && matchesProduct && matchesColour && matchesSize;
+    });
+    
     setFilteredInventory(filtered);
-  }, [searchQuery, inventory]);
+    setCurrentPage(1); // Reset to first page when search/filters change
+  }, [searchQuery, inventory, productFilter, colourFilter, sizeFilter]);
 
   const loadInventory = async () => {
     try {
+      // Fetch all records by setting a high range limit
+      // This handles datasets of 10,000+ items
       const { data, error } = await supabase
         .from('inventory_items')
-        .select('*')
+        .select('*', { count: 'exact' })
         .eq('user_id', user?.id)
-        .order('updated_at', { ascending: false });
+        .order('updated_at', { ascending: false })
+        .range(0, 9999); // Fetch up to 10,000 records
 
       if (error) throw error;
       setInventory(data || []);
+      
+      // Log record count for monitoring
+      console.log(`Loaded ${data?.length || 0} inventory items`);
     } catch (error) {
       console.error('Error loading inventory:', error);
     } finally {
       setLoading(false);
     }
+  };
+
+  const loadFilterOptions = async () => {
+    try {
+      setFiltersLoading(true);
+      
+      // Get unique products
+      const { data: products, error: productsError } = await supabase
+        .from('inventory_items')
+        .select('product')
+        .eq('user_id', user?.id)
+        .order('product');
+
+      if (productsError) throw productsError;
+      
+      // Get unique colours
+      const { data: colours, error: coloursError } = await supabase
+        .from('inventory_items')
+        .select('colour')
+        .eq('user_id', user?.id)
+        .not('colour', 'is', null)
+        .order('colour');
+
+      if (coloursError) throw coloursError;
+      
+      // Get unique sizes
+      const { data: sizes, error: sizesError } = await supabase
+        .from('inventory_items')
+        .select('size')
+        .eq('user_id', user?.id)
+        .not('size', 'is', null)
+        .order('size');
+
+      if (sizesError) throw sizesError;
+
+      // Extract unique values and remove duplicates
+      const uniqueProductsList = [...new Set(products?.map(p => p.product) || [])];
+      const uniqueColoursList = [...new Set(colours?.map(c => c.colour).filter(Boolean) || [])];
+      const uniqueSizesList = [...new Set(sizes?.map(s => s.size).filter(Boolean) || [])];
+
+      setUniqueProducts(uniqueProductsList);
+      setUniqueColours(uniqueColoursList);
+      setUniqueSizes(uniqueSizesList);
+
+    } catch (error) {
+      console.error('Error loading filter options:', error);
+    } finally {
+      setFiltersLoading(false);
+    }
+  };
+
+  const clearAllFilters = () => {
+    setProductFilter('');
+    setColourFilter('');
+    setSizeFilter('');
+    setSearchQuery('');
+  };
+
+  const clearIndividualFilter = (filterType: string) => {
+    switch (filterType) {
+      case 'product':
+        setProductFilter('');
+        break;
+      case 'colour':
+        setColourFilter('');
+        break;
+      case 'size':
+        setSizeFilter('');
+        break;
+      case 'search':
+        setSearchQuery('');
+        break;
+    }
+  };
+
+  const getActiveFiltersCount = () => {
+    let count = 0;
+    if (productFilter) count++;
+    if (colourFilter) count++;
+    if (sizeFilter) count++;
+    if (searchQuery) count++;
+    return count;
   };
 
   const handleSignOut = async () => {
@@ -130,6 +250,18 @@ export default function Dashboard() {
   const totalItems = inventory.length;
   const totalQuantity = inventory.reduce((sum, item) => sum + item.quantity, 0);
   const lowStockItems = inventory.filter(item => item.quantity <= item.low_stock_threshold).length;
+
+  // Pagination calculations
+  const totalPages = Math.ceil(filteredInventory.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const paginatedItems = filteredInventory.slice(startIndex, endIndex);
+
+  const goToPage = (page: number) => {
+    if (page >= 1 && page <= totalPages) {
+      setCurrentPage(page);
+    }
+  };
 
   if (loading) {
     return (
@@ -227,15 +359,140 @@ export default function Dashboard() {
                 <span>Add Item</span>
               </button>
             </div>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search by barcode, product, colour, or size..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
+
+            {/* Filter Controls */}
+            <div className="mb-4 space-y-4">
+              {/* Filter Row */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                {/* Product Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Product</label>
+                  <select
+                    value={productFilter}
+                    onChange={(e) => setProductFilter(e.target.value)}
+                    disabled={filtersLoading}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+                  >
+                    <option value="">All Products</option>
+                    {uniqueProducts.map((product) => (
+                      <option key={product} value={product}>{product}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Colour Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Colour</label>
+                  <select
+                    value={colourFilter}
+                    onChange={(e) => setColourFilter(e.target.value)}
+                    disabled={filtersLoading}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+                  >
+                    <option value="">All Colours</option>
+                    <option value="none">No Colour</option>
+                    {uniqueColours.map((colour) => (
+                      <option key={colour} value={colour}>{colour}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Size Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Size</label>
+                  <select
+                    value={sizeFilter}
+                    onChange={(e) => setSizeFilter(e.target.value)}
+                    disabled={filtersLoading}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+                  >
+                    <option value="">All Sizes</option>
+                    <option value="none">No Size</option>
+                    {uniqueSizes.map((size) => (
+                      <option key={size} value={size}>{size}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Clear Filters */}
+                <div className="flex items-end">
+                  <button
+                    onClick={clearAllFilters}
+                    disabled={getActiveFiltersCount() === 0}
+                    className="flex items-center gap-2 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Filter className="w-4 h-4" />
+                    <span>Clear All ({getActiveFiltersCount()})</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Search Bar */}
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Search by barcode, product, colour, or size..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+
+              {/* Active Filters Display */}
+              {getActiveFiltersCount() > 0 && (
+                <div className="flex flex-wrap gap-2 items-center">
+                  <span className="text-sm font-medium text-gray-700">Active Filters:</span>
+                  
+                  {searchQuery && (
+                    <div className="flex items-center gap-1 px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm">
+                      <span>Search: "{searchQuery}"</span>
+                      <button
+                        onClick={() => clearIndividualFilter('search')}
+                        className="hover:bg-blue-200 rounded-full p-0.5"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+                  
+                  {productFilter && (
+                    <div className="flex items-center gap-1 px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm">
+                      <span>Product: {productFilter}</span>
+                      <button
+                        onClick={() => clearIndividualFilter('product')}
+                        className="hover:bg-green-200 rounded-full p-0.5"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+                  
+                  {colourFilter && (
+                    <div className="flex items-center gap-1 px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm">
+                      <span>Colour: {colourFilter === 'none' ? 'No Colour' : colourFilter}</span>
+                      <button
+                        onClick={() => clearIndividualFilter('colour')}
+                        className="hover:bg-purple-200 rounded-full p-0.5"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+                  
+                  {sizeFilter && (
+                    <div className="flex items-center gap-1 px-3 py-1 bg-orange-100 text-orange-800 rounded-full text-sm">
+                      <span>Size: {sizeFilter === 'none' ? 'No Size' : sizeFilter}</span>
+                      <button
+                        onClick={() => clearIndividualFilter('size')}
+                        className="hover:bg-orange-200 rounded-full p-0.5"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -256,11 +513,11 @@ export default function Dashboard() {
                 {filteredInventory.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="px-6 py-12 text-center text-gray-500">
-                      {searchQuery ? 'No items found matching your search' : 'No items in inventory. Start by scanning a barcode!'}
+                      {getActiveFiltersCount() > 0 ? 'No items found matching your filters' : 'No items in inventory. Start by scanning a barcode!'}
                     </td>
                   </tr>
                 ) : (
-                  filteredInventory.map((item) => (
+                  paginatedItems.map((item) => (
                     <tr key={item.id} className="hover:bg-gray-50">
                       {editingItem?.id === item.id ? (
                         <>
@@ -354,6 +611,79 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
+
+          {/* Pagination Controls */}
+          {filteredInventory.length > 0 && (
+            <div className="px-6 py-4 border-t flex items-center justify-between">
+              <div className="text-sm text-gray-700">
+                Showing <span className="font-medium">{startIndex + 1}</span> to{' '}
+                <span className="font-medium">{Math.min(endIndex, filteredInventory.length)}</span> of{' '}
+                <span className="font-medium">{filteredInventory.length}</span> items
+                {getActiveFiltersCount() > 0 && ` (filtered from ${inventory.length} total)`}
+              </div>
+              
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => goToPage(1)}
+                  disabled={currentPage === 1}
+                  className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                >
+                  First
+                </button>
+                <button
+                  onClick={() => goToPage(currentPage - 1)}
+                  disabled={currentPage === 1}
+                  className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                >
+                  Previous
+                </button>
+                
+                <div className="flex items-center gap-1">
+                  {[...Array(Math.min(5, totalPages))].map((_, idx) => {
+                    let pageNum;
+                    if (totalPages <= 5) {
+                      pageNum = idx + 1;
+                    } else if (currentPage <= 3) {
+                      pageNum = idx + 1;
+                    } else if (currentPage >= totalPages - 2) {
+                      pageNum = totalPages - 4 + idx;
+                    } else {
+                      pageNum = currentPage - 2 + idx;
+                    }
+                    
+                    return (
+                      <button
+                        key={idx}
+                        onClick={() => goToPage(pageNum)}
+                        className={`px-3 py-1 border rounded text-sm ${
+                          currentPage === pageNum
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'hover:bg-gray-50'
+                        }`}
+                      >
+                        {pageNum}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  onClick={() => goToPage(currentPage + 1)}
+                  disabled={currentPage === totalPages}
+                  className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                >
+                  Next
+                </button>
+                <button
+                  onClick={() => goToPage(totalPages)}
+                  disabled={currentPage === totalPages}
+                  className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                >
+                  Last
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </main>
     </div>
